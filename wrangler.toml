@@ -1,0 +1,9 @@
+name = "edgerunners"
+main = "_worker.js"
+compatibility_date = "2025-11-04"
+keep_vars = true
+
+# Uncomment and fill in your KV namespace ID to enable config persistence
+#[[kv_namespaces]]
+#binding = "KV"   # Do not change this binding name
+#id = ""          # Your KV namespace ID
