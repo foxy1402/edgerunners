@@ -36,19 +36,20 @@ A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS, Troj
 
 ## Deploy on Cloudflare Workers (Dashboard — no CLI needed)
 
-1. Log in to [dash.cloudflare.com](https://dash.cloudflare.com) and go to **Workers & Pages**.
-2. Click **Create** → **Worker** → give it a name → **Deploy**.
-3. Click **Edit code**, paste the full contents of `_worker.js`, then click **Deploy**.
-4. Go to **Settings → Variables** and add:
-   - `ADMIN` = your chosen admin password (required)
-   - Any other optional variables from the table above
-5. Go to **Settings → Bindings**, click **Add**:
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com) → **Compute (Workers)** in the left sidebar → **Workers & Pages** → **Create application**.
+2. Click **Start with Hello World!**, give the worker a name (e.g. `edgerunners`), then click **Deploy**.
+3. On the worker's page, click **Edit code** (top-right).
+4. Select all the placeholder code in the editor, delete it, paste the full contents of `_worker.js`, then click **Deploy**.
+5. Go back to the worker's main page → **Settings → Variables & Secrets** → **Add** → set:
+   - Variable name: `ADMIN` — Value: your chosen admin password
+   - Add any other optional variables from the table above
+6. Still in **Settings** → **Bindings** → **Add**:
    - Type: **KV Namespace**
    - Variable name: `KV`
-   - Select or create a namespace
-6. Visit `https://your-worker.workers.dev/login` to open the admin panel.
+   - Select or create a namespace (create one first at **Storage & Databases → KV** if you don't have one)
+7. Visit `https://your-worker-name.workers.dev/login` to open the admin panel.
 
-> Your subscription URL is shown on the admin panel. Copy it and import it into your proxy client.
+> Your subscription URL is shown on the admin panel homepage. Copy it and import it into your proxy client.
 
 ---
 

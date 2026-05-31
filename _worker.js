@@ -221,7 +221,7 @@ export default {
 				if (pathRaw === 'admin/ADD.txt') {
 					let customIPs = await env.KV.get('ADD.txt') || 'null';
 					if (customIPs === 'null') {
-						const [ips] = await generateRandomIPs(config['优选订阅生成']['本地IP库']['随机数量'], config['优选订阅生成']['本地IP库']['指定端口']);
+						const [ips] = await generateRandomIPs(config['subGen']['localIPPool']['count'], config['subGen']['localIPPool']['fixedPort']);
 						customIPs = ips.join('\n');
 					}
 					return new Response(customIPs, { status: 200, headers: { 'Content-Type': 'text/plain', 'asn': String(request.cf.asn) } });
@@ -234,7 +234,7 @@ export default {
 				config.UUID,
 				`${url.protocol}//${url.host}/sub?token=${subToken}`,
 				config.PATH || '/',
-				config['协议类型'] || 'vless'
+				config['protocol'] || 'vless'
 			), { status: 200, headers: { 'Content-Type': 'text/html; charset=UTF-8', 'Cache-Control': 'no-store' } });
 			}
 
@@ -260,40 +260,47 @@ export default {
 					const ua = UA.toLowerCase();
 					const respHeaders = {
 						'content-type': 'text/plain; charset=utf-8',
-						'Profile-Update-Interval': String(config['优选订阅生成'].SUBUpdateTime || 3),
+						'Profile-Update-Interval': String(config['subGen'].SUBUpdateTime || 3),
 						'Profile-web-page-url': `${url.protocol}//${url.host}/admin`,
 						'Cache-Control': 'no-store'
 					};
 					if (!ua.includes('mozilla')) {
-						respHeaders['Content-Disposition'] = `attachment; filename*=utf-8''${encodeURIComponent(config['优选订阅生成'].SUBNAME)}`;
+						respHeaders['Content-Disposition'] = `attachment; filename*=utf-8''${encodeURIComponent(config['subGen'].SUBNAME)}`;
 					}
 
-					const protocol = config['协议类型'];
-					const [ipArray, otherLinks, proxyIPPool] = await buildIPList(env, url, config);
+				const cfgProto = config['protocol'] || 'vless';
+				const protocols = cfgProto === 'all' ? ['vless', 'trojan', 'ss'] : [cfgProto];
+				const isMulti = protocols.length > 1;
+				const [ipArray, otherLinks, proxyIPPool] = await buildIPList(env, url, config);
 
-					let content = otherLinks + ipArray.map(rawAddr => {
-						const re = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
-						const m = rawAddr.match(re);
-						if (!m) { console.warn(`[sub] Invalid IP format ignored: ${rawAddr}`); return null; }
-						const addr = m[1], port = m[2] || '443', remark = m[3] || m[1];
-						let nodePath = config['完整节点路径'] || config.PATH || '/';
-						if (proxyIPPool.length > 0) {
-							const matched = proxyIPPool.find(p => p.includes(addr));
-							if (matched) nodePath = (`${config.PATH}/proxyip=${matched}`).replace(/\/\//g, '/');
-						}
-						if (protocol === 'ss') {
-							const tlsPorts = [443, 2053, 2083, 2087, 2096, 8443];
-							const noTLSPorts = [80, 2052, 2082, 2086, 2095, 8080];
+				const tlsPorts = [443, 2053, 2083, 2087, 2096, 8443];
+				const noTLSPorts = [80, 2052, 2082, 2086, 2095, 8080];
+				const addrRe = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
+
+				let content = otherLinks + ipArray.flatMap(rawAddr => {
+					const m = rawAddr.match(addrRe);
+					if (!m) { console.warn(`[sub] Invalid IP format ignored: ${rawAddr}`); return []; }
+					const addr = m[1], port = m[2] || '443', remark = m[3] || m[1];
+					let nodePath = config['fullNodePath'] || config.PATH || '/';
+					if (proxyIPPool.length > 0) {
+						const matched = proxyIPPool.find(p => p.includes(addr));
+						if (matched) nodePath = (`${config.PATH}/proxyip=${matched}`).replace(/\/\//g, '/');
+					}
+					return protocols.map(proto => {
+						const tag = isMulti ? ` [${proto.toUpperCase()}]` : '';
+						const r = encodeURIComponent(remark + tag);
+						if (proto === 'ss') {
 							const p = config.SS.TLS ? port : String(noTLSPorts[tlsPorts.indexOf(Number(port))] ?? port);
 							const np = (nodePath.includes('?')
-								? nodePath.replace('?', `?enc=${config.SS['加密方式']}&`)
-								: `${nodePath}?enc=${config.SS['加密方式']}`
+								? nodePath.replace('?', `?enc=${config.SS['cipher']}&`)
+								: `${nodePath}?enc=${config.SS['cipher']}`
 							).replace(/([=,])/g, '\\$1') + ';mux=0';
-							return `ss://${btoa(config.SS['加密方式'] + ':00000000-0000-4000-8000-000000000000')}@${addr}:${p}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=example.com;path=${np}${config.SS.TLS ? ';tls' : ''}`)}#${encodeURIComponent(remark)}`;
+							return `ss://${btoa(config.SS['cipher'] + ':00000000-0000-4000-8000-000000000000')}@${addr}:${p}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=example.com;path=${np}${config.SS.TLS ? ';tls' : ''}`)}#${r}`;
 						} else {
-							return `${protocol}://00000000-0000-4000-8000-000000000000@${addr}:${port}?security=tls&type=ws&host=example.com&fp=${config.Fingerprint}&sni=example.com&path=${encodeURIComponent(nodePath)}&encryption=none${config['跳过证书验证'] ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(remark)}`;
+							return `${proto}://00000000-0000-4000-8000-000000000000@${addr}:${port}?security=tls&type=ws&host=example.com&fp=${config.Fingerprint}&sni=example.com&path=${encodeURIComponent(nodePath)}&encryption=none${config['skipCertVerify'] ? '&insecure=1&allowInsecure=1' : ''}#${r}`;
 						}
-					}).filter(Boolean).join('\n');
+					});
+				}).filter(Boolean).join('\n');
 
 					// Replace placeholders with real values for user requests
 					if (!ua.includes('subconverter') && isUser) {
@@ -1331,16 +1338,16 @@ function parseProxyAccount(address, defaultPort = 80) {
 
 // ─────────────────────────── Subscription IP List Builder ───────────────────────────
 async function buildIPList(env, url, cfg) {
-	if (!url.searchParams.has('sub') && cfg['优选订阅生成'].local) {
-		const kvCfg = cfg['优选订阅生成']['本地IP库'];
+	if (!url.searchParams.has('sub') && cfg['subGen'].local) {
+		const kvCfg = cfg['subGen']['localIPPool'];
 		let fullList;
-		if (kvCfg['随机IP']) {
-			const [ips] = await generateRandomIPs(kvCfg['随机数量'], kvCfg['指定端口']);
+		if (kvCfg['randomIP']) {
+			const [ips] = await generateRandomIPs(kvCfg['count'], kvCfg['fixedPort']);
 			fullList = ips;
 		} else {
 			const saved = await env.KV.get('ADD.txt');
 			if (saved) fullList = await normalizeToArray(saved);
-			else { const [ips] = await generateRandomIPs(kvCfg['随机数量'], kvCfg['指定端口']); fullList = ips; }
+			else { const [ips] = await generateRandomIPs(kvCfg['count'], kvCfg['fixedPort']); fullList = ips; }
 		}
 		const apiURLs = [], ipList = [], otherNodes = [];
 		for (const el of fullList) {
@@ -1359,7 +1366,7 @@ async function buildIPList(env, url, cfg) {
 		const otherLinks = merged.length ? merged.join('\n') + '\n' : '';
 		return [[...new Set(ipList.concat(apiResult[0]))], otherLinks, apiResult[2] || []];
 	} else {
-		const subHost = url.searchParams.get('sub') || cfg['优选订阅生成'].SUB;
+		const subHost = url.searchParams.get('sub') || cfg['subGen'].SUB;
 		const [genIPs, genOther] = await fetchOptimalSubData(subHost);
 		return [genIPs, genOther, []];
 	}
@@ -1371,21 +1378,21 @@ async function readConfig(env, hostname, userID, UA = 'Mozilla/5.0', reset = fal
 	const defaults = {
 		TIME: new Date().toISOString(),
 		HOST: host, HOSTS: [hostname], UUID: userID, PATH: '/',
-		'协议类型': 'vless',
-		'跳过证书验证': false,
-		'启用0RTT': false,
-		'随机路径': false,
-		SS: { '加密方式': 'aes-128-gcm', TLS: true },
+		'protocol': 'all',
+		'skipCertVerify': false,
+		'enable0RTT': false,
+		'randomPath': false,
+		SS: { 'cipher': 'aes-128-gcm', TLS: true },
 		Fingerprint: 'chrome',
-		'优选订阅生成': {
+		'subGen': {
 			local: true,
-			'本地IP库': { '随机IP': true, '随机数量': 16, '指定端口': -1 },
+			'localIPPool': { 'randomIP': true, 'count': 16, 'fixedPort': -1 },
 			SUB: null, SUBNAME: 'edgerunners', SUBUpdateTime: 3,
 			TOKEN: await MD5MD5(hostname + userID)
 		},
-		'反代': {
+		'outbound': {
 			PROXYIP: 'auto',
-			SOCKS5: { '启用': proxyType, '全局': proxyGlobal, '账号': proxyAccount, '白名单': socks5Whitelist }
+			SOCKS5: { 'enabled': proxyType, 'global': proxyGlobal, 'account': proxyAccount, 'whitelist': socks5Whitelist }
 		}
 	};
 	let cfg;
@@ -1399,27 +1406,27 @@ async function readConfig(env, hostname, userID, UA = 'Mozilla/5.0', reset = fal
 	if (!cfg.HOSTS) cfg.HOSTS = [hostname];
 	if (env.HOST) cfg.HOSTS = (await normalizeToArray(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]);
 	cfg.UUID = userID;
-	if (!cfg['随机路径']) cfg['随机路径'] = false;
-	if (!cfg['启用0RTT']) cfg['启用0RTT'] = false;
+	if (!cfg['randomPath']) cfg['randomPath'] = false;
+	if (!cfg['enable0RTT']) cfg['enable0RTT'] = false;
 	if (env.PATH) cfg.PATH = env.PATH.startsWith('/') ? env.PATH : '/' + env.PATH;
 	else if (!cfg.PATH) cfg.PATH = '/';
-	if (!cfg.SS) cfg.SS = { '加密方式': 'aes-128-gcm', TLS: false };
+	if (!cfg.SS) cfg.SS = { 'cipher': 'aes-128-gcm', TLS: false };
 	if (!cfg.Fingerprint) cfg.Fingerprint = 'chrome';
-	if (!cfg['优选订阅生成']) cfg['优选订阅生成'] = defaults['优选订阅生成'];
-	if (!cfg['优选订阅生成']['本地IP库']) cfg['优选订阅生成']['本地IP库'] = { '随机IP': true, '随机数量': 16, '指定端口': -1 };
+	if (!cfg['subGen']) cfg['subGen'] = defaults['subGen'];
+	if (!cfg['subGen']['localIPPool']) cfg['subGen']['localIPPool'] = { 'randomIP': true, 'count': 16, 'fixedPort': -1 };
 
 	// Build full node path
-	const proxyCfg = cfg['反代']?.SOCKS5?.['启用']?.toUpperCase();
+	const proxyCfg = cfg['outbound']?.SOCKS5?.['enabled']?.toUpperCase();
 	const pathTpls = {
 		SOCKS5: { global: `socks5://${ph}`, standard: `socks5=${ph}` },
 		HTTP: { global: `http://${ph}`, standard: `http=${ph}` }
 	};
 	let proxyPathParam = '';
-	if (proxyCfg && cfg['反代']?.SOCKS5?.['账号']) {
+	if (proxyCfg && cfg['outbound']?.SOCKS5?.['account']) {
 		const tpl = pathTpls[proxyCfg];
-		if (tpl) proxyPathParam = (cfg['反代'].SOCKS5['全局'] ? tpl.global : tpl.standard).replace(ph, cfg['反代'].SOCKS5['账号']);
-	} else if (cfg['反代']?.PROXYIP && cfg['反代'].PROXYIP !== 'auto') {
-		proxyPathParam = `proxyip=${cfg['反代'].PROXYIP}`;
+		if (tpl) proxyPathParam = (cfg['outbound'].SOCKS5['global'] ? tpl.global : tpl.standard).replace(ph, cfg['outbound'].SOCKS5['account']);
+	} else if (cfg['outbound']?.PROXYIP && cfg['outbound'].PROXYIP !== 'auto') {
+		proxyPathParam = `proxyip=${cfg['outbound'].PROXYIP}`;
 	}
 
 	let proxyQuery = '';
@@ -1429,15 +1436,16 @@ async function readConfig(env, hostname, userID, UA = 'Mozilla/5.0', reset = fal
 	const [pathPart, ...qParts] = normalizedPath.split('?');
 	const queryPart = qParts.length ? '?' + qParts.join('?') : '';
 	const finalQuery = proxyQuery ? (queryPart ? queryPart + '&' + proxyQuery : '?' + proxyQuery) : queryPart;
-	const zeroRTT = cfg['启用0RTT'] ? (finalQuery ? '&' : '?') + 'ed=2560' : '';
-	cfg['完整节点路径'] = (pathPart || '/') + (pathPart && proxyPathParam ? '/' : '') + proxyPathParam + finalQuery + zeroRTT;
+	const zeroRTT = cfg['enable0RTT'] ? (finalQuery ? '&' : '?') + 'ed=2560' : '';
+	cfg['fullNodePath'] = (pathPart || '/') + (pathPart && proxyPathParam ? '/' : '') + proxyPathParam + finalQuery + zeroRTT;
 
-	const protocol = cfg['协议类型'], nodePath = cfg['完整节点路径'];
-	cfg.LINK = protocol === 'ss'
-		? `ss://${btoa(cfg.SS['加密方式'] + ':' + userID)}@${host}:${cfg.SS.TLS ? '443' : '80'}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=${host};path=${nodePath + (cfg.SS.TLS ? ';tls' : '')};mux=0`)}#${encodeURIComponent(cfg['优选订阅生成'].SUBNAME)}`
-		: `${protocol}://${userID}@${host}:443?security=tls&type=ws&host=${host}&fp=${cfg.Fingerprint}&sni=${host}&path=${encodeURIComponent(nodePath)}&encryption=none${cfg['跳过证书验证'] ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(cfg['优选订阅生成'].SUBNAME)}`;
+	const nodePath = cfg['fullNodePath'];
+	const linkProto = (cfg['protocol'] === 'all' || !cfg['protocol']) ? 'vless' : cfg['protocol'];
+	cfg.LINK = linkProto === 'ss'
+		? `ss://${btoa(cfg.SS['cipher'] + ':' + userID)}@${host}:${cfg.SS.TLS ? '443' : '80'}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=${host};path=${nodePath + (cfg.SS.TLS ? ';tls' : '')};mux=0`)}#${encodeURIComponent(cfg['subGen'].SUBNAME)}`
+		: `${linkProto}://${userID}@${host}:443?security=tls&type=ws&host=${host}&fp=${cfg.Fingerprint}&sni=${host}&path=${encodeURIComponent(nodePath)}&encryption=none${cfg['skipCertVerify'] ? '&insecure=1&allowInsecure=1' : ''}#${encodeURIComponent(cfg['subGen'].SUBNAME)}`;
 
-	cfg['优选订阅生成'].TOKEN = await MD5MD5(hostname + userID);
+	cfg['subGen'].TOKEN = await MD5MD5(hostname + userID);
 	return cfg;
 }
 
@@ -1720,6 +1728,7 @@ document.getElementById('err').style.display='block';btn.disabled=false;btn.text
 }
 
 function adminPageHTML(uuid, subUrl, wsPath, proto) {
+	const qrSub = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=${encodeURIComponent(subUrl)}`;
 	return `<!DOCTYPE html><html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin &#8212; Edgerunners</title>
@@ -1738,7 +1747,10 @@ header a:hover{border-color:#8b949e;color:#c9d1d9}
 .val{font-size:.85rem;color:#c9d1d9;word-break:break-all;flex:1;font-family:ui-monospace,monospace}
 .cp{padding:.2rem .55rem;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;font-size:.75rem;white-space:nowrap}
 .cp:hover{background:#30363d}
-.sub-u{font-size:.85rem;color:#58a6ff;word-break:break-all;font-family:ui-monospace,monospace;line-height:1.5}
+.sub-u{font-size:.85rem;color:#58a6ff;word-break:break-all;font-family:ui-monospace,monospace;line-height:1.5;margin-bottom:.75rem}
+.qr-wrap{display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap}
+.qr-wrap .qr-text{flex:1;min-width:200px}
+.qr-wrap img{width:180px;height:180px;border-radius:8px;background:#fff;flex-shrink:0}
 textarea{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:.75rem;color:#c9d1d9;font-size:.78rem;font-family:ui-monospace,monospace;resize:vertical;min-height:320px;outline:none;line-height:1.5}
 textarea:focus{border-color:#58a6ff}
 .save{padding:.5rem 1rem;background:#238636;border:none;border-radius:8px;color:#fff;font-size:.85rem;font-weight:600;cursor:pointer;margin-top:.75rem}
@@ -1746,19 +1758,28 @@ textarea:focus{border-color:#58a6ff}
 .msg{margin-top:.5rem;font-size:.8rem;display:none;padding:.4rem .7rem;border-radius:6px}
 .ok{color:#3fb950;background:rgba(63,185,80,.1)}
 .bad{color:#f85149;background:rgba(248,81,73,.1)}
+.proto-tag{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.72rem;font-weight:600;background:#1f3244;color:#58a6ff;border:1px solid #1d4a7a;margin-bottom:.6rem}
 </style></head><body>
 <header><h1>&#9889; Edgerunners Admin</h1><a href="/logout">Logout</a></header>
 <div class="wrap">
 <div class="card"><h2>Connection Info</h2>
 <div class="row"><span class="lbl">UUID</span><span class="val" id="u">${uuid}</span><button class="cp" onclick="cp('u',this)">Copy</button></div>
-<div class="row"><span class="lbl">Protocol</span><span class="val">${proto}</span></div>
+<div class="row"><span class="lbl">Protocol</span><span class="val">${proto === 'all' ? 'VLESS + Trojan + Shadowsocks' : proto.toUpperCase()}</span></div>
 <div class="row"><span class="lbl">WS Path</span><span class="val">${wsPath}</span></div>
 </div>
-<div class="card"><h2>Subscription URL &#8212; import this link into your proxy client</h2>
-<p class="sub-u" id="s">${subUrl}</p>
-<button class="cp" style="margin-top:.5rem" onclick="cp('s',this)">Copy URL</button>
+<div class="card">
+<h2>Subscription URL</h2>
+<p style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem">Import this link into your proxy client. ${proto === 'all' ? 'All 3 protocols (VLESS, Trojan, Shadowsocks) are included.' : ''}</p>
+<div class="qr-wrap">
+  <div class="qr-text">
+    <p class="sub-u" id="s">${subUrl}</p>
+    <button class="cp" onclick="cp('s',this)">Copy URL</button>
+  </div>
+  <img src="${qrSub}" alt="Scan to import subscription" title="Scan with your proxy app to import">
+</div>
 </div>
 <div class="card"><h2>Edit Config (JSON)</h2>
+<p style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem">Set <code style="background:#0d1117;padding:.1rem .3rem;border-radius:4px;color:#f6931f">"protocol"</code> to <code style="background:#0d1117;padding:.1rem .3rem;border-radius:4px;color:#f6931f">"all"</code>, <code style="background:#0d1117;padding:.1rem .3rem;border-radius:4px;color:#f6931f">"vless"</code>, <code style="background:#0d1117;padding:.1rem .3rem;border-radius:4px;color:#f6931f">"trojan"</code>, or <code style="background:#0d1117;padding:.1rem .3rem;border-radius:4px;color:#f6931f">"ss"</code>.</p>
 <textarea id="cfg" spellcheck="false">Loading...</textarea>
 <button class="save" onclick="save()">Save Config</button>
 <p class="msg" id="m"></p>
