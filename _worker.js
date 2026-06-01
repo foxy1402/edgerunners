@@ -47,7 +47,7 @@ export default {
 		proxyIP = proxyIPs.length ? proxyIPs[Math.floor(Math.random() * proxyIPs.length)] : '';
 		proxyFallback = ['1', 'true', 'yes'].includes(String(env.PROXYIP_FALLBACK || '').toLowerCase());
 
-		if (url.protocol === 'http:') return Response.redirect(url.href.replace('http://', 'https://'), 301);
+		if (url.protocol === 'http:' && upgradeHeader !== 'websocket') return Response.redirect(url.href.replace('http://', 'https://'), 301);
 		if (path === 'robots.txt') return new Response('User-agent: *\nDisallow: /', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
 		if (path === 'version' && url.searchParams.get('uuid') === userID) {
 			return jsonResponse({ version: Version, build: Number(String(Version).replace(/\D+/g, '')) || 0 });
@@ -103,19 +103,49 @@ function normalizePath(value) {
 
 function buildSubscription({ config, hosts, userID }) {
 	const protocol = String(config.PROTOCOL || 'vless').toLowerCase();
+	const protocols = protocol === 'both' ? ['vless', 'trojan'] : [protocol];
 	const nodePath = normalizePath(config.PATH || '/');
 	const fingerprint = config.FINGERPRINT || 'chrome';
 	const name = config.SUB_NAME || 'edgerunners';
-	return hosts.map((h, i) => buildNodeLink({
-		protocol, nodePath, fingerprint,
-		name: hosts.length > 1 ? `${name}-${i + 1}` : name,
-		userID, host: h
-	})).join('\n');
+	const ports = parsePorts(config.PORTS || '443');
+	const multiHost = hosts.length > 1;
+	const multiPort = ports.length > 1;
+	const multiProto = protocols.length > 1;
+	const links = [];
+	for (const [hi, host] of hosts.entries()) {
+		for (const port of ports) {
+			for (const proto of protocols) {
+				const suffix = [
+					multiHost ? String(hi + 1) : '',
+					multiPort ? String(port) : '',
+					multiProto ? proto : '',
+				].filter(Boolean).join('-');
+				const linkName = suffix ? `${name}-${suffix}` : name;
+				links.push(buildNodeLink({ protocol: proto, nodePath, fingerprint, name: linkName, userID, host, port }));
+			}
+		}
+	}
+	return links.join('\n');
 }
 
-function buildNodeLink({ protocol, nodePath, fingerprint, name, userID, host }) {
+// Cloudflare-supported TLS ports (WSS / security=tls)
+const CF_TLS_PORTS = new Set([443, 2053, 2083, 2087, 2096, 8443]);
+
+function parsePorts(portsStr) {
+	return [...new Set(
+		String(portsStr || '443').split(/[\n,\s]+/)
+			.map(p => parseInt(p.trim(), 10))
+			.filter(p => !isNaN(p) && p > 0 && p <= 65535)
+	)];
+}
+
+function buildNodeLink({ protocol, nodePath, fingerprint, name, userID, host, port = 443 }) {
 	const scheme = protocol === 'trojan' ? 'trojan' : 'vless';
-	return `${scheme}://${userID}@${host}:443?security=tls&type=ws&host=${encodeURIComponent(host)}&fp=${encodeURIComponent(fingerprint)}&sni=${encodeURIComponent(host)}&path=${encodeURIComponent(nodePath)}&encryption=none#${encodeURIComponent(name)}`;
+	const tls = CF_TLS_PORTS.has(port);
+	if (tls) {
+		return `${scheme}://${userID}@${host}:${port}?security=tls&type=ws&host=${encodeURIComponent(host)}&fp=${encodeURIComponent(fingerprint)}&sni=${encodeURIComponent(host)}&path=${encodeURIComponent(nodePath)}&encryption=none#${encodeURIComponent(name)}`;
+	}
+	return `${scheme}://${userID}@${host}:${port}?security=none&type=ws&host=${encodeURIComponent(host)}&path=${encodeURIComponent(nodePath)}&encryption=none#${encodeURIComponent(name)}`;
 }
 
 function jsonResponse(data, status = 200) {
@@ -139,6 +169,7 @@ function createDefaultConfig(env, hosts, currentHost) {
 		HOSTS: hosts.length ? hosts : [currentHost],
 		PATH: normalizePath(env.PATH || '/'),
 		PROTOCOL: String(env.PROTOCOL || 'vless').toLowerCase(),
+		PORTS: env.PORTS || '443',
 		SUB_NAME: env.SUB_NAME || 'edgerunners',
 		PROXYIP: env.PROXYIP || '',
 		URL: env.URL || 'nginx',
@@ -169,7 +200,8 @@ function normalizeConfig(config, defaults) {
 		...config,
 		HOSTS: hosts.map(normalizeHost).filter(Boolean).length ? hosts.map(normalizeHost).filter(Boolean) : defaults.HOSTS,
 		PATH: normalizePath(config.PATH || defaults.PATH),
-		PROTOCOL: ['vless', 'trojan'].includes(String(config.PROTOCOL || '').toLowerCase()) ? String(config.PROTOCOL).toLowerCase() : defaults.PROTOCOL,
+		PROTOCOL: ['vless', 'trojan', 'both'].includes(String(config.PROTOCOL || '').toLowerCase()) ? String(config.PROTOCOL).toLowerCase() : defaults.PROTOCOL,
+		PORTS: parsePorts(config.PORTS || defaults.PORTS || '443').join(', '),
 		SUB_NAME: String(config.SUB_NAME || defaults.SUB_NAME || 'edgerunners').trim(),
 		PROXYIP: String(config.PROXYIP || '').trim(),
 		URL: String(config.URL || defaults.URL || 'nginx').trim(),
@@ -226,6 +258,7 @@ async function handleAdminRoute(request, env, url, config, defaultConfig, token,
 			HOSTS: params.get('HOSTS') || '',
 			PATH: params.get('PATH') || '/',
 			PROTOCOL: params.get('PROTOCOL') || 'vless',
+			PORTS: params.get('PORTS') || '443',
 			SUB_NAME: params.get('SUB_NAME') || 'edgerunners',
 			PROXYIP: params.get('PROXYIP') || '',
 			URL: params.get('URL') || 'nginx',
@@ -296,10 +329,20 @@ ${adminStyles()}
 		<label>Hosts<textarea name="HOSTS" rows="3">${escapeHTML(hostText)}</textarea></label>
 		<label>Path<input name="PATH" value="${escapeAttr(config.PATH)}"></label>
 		<label>Subscription Name<input name="SUB_NAME" value="${escapeAttr(config.SUB_NAME)}"></label>
+		<label>Ports
+			<input id="portsInput" name="PORTS" value="${escapeAttr(config.PORTS || '443')}" placeholder="443, 8443, 2053, 80, 8080, …">
+			<span class="port-presets">
+				<button type="button" data-ports="443">443</button>
+				<button type="button" data-ports="443, 8443, 2053, 2083, 2087, 2096">TLS All</button>
+				<button type="button" data-ports="80, 8080, 8880, 2052, 2082, 2086, 2095">WS All</button>
+				<button type="button" data-ports="443, 8443, 2053, 2083, 2087, 2096, 80, 8080, 8880, 2052, 2082, 2086, 2095">All</button>
+			</span>
+			<span class="field-hint">TLS (WSS): 443 2053 2083 2087 2096 8443 &nbsp;|&nbsp; Plain WS: 80 8080 8880 2052 2082 2086 2095</span>
+		</label>
+		<label>Protocol<select name="PROTOCOL">${optionList(['vless', 'trojan', 'both'], config.PROTOCOL)}</select></label>
+		<label>Fingerprint<input name="FINGERPRINT" value="${escapeAttr(config.FINGERPRINT)}"></label>
 		<label>ProxyIP<input name="PROXYIP" value="${escapeAttr(config.PROXYIP)}" placeholder="hostname or ip:port"></label>
 		<label>Camouflage URL<input name="URL" value="${escapeAttr(config.URL)}" placeholder="nginx, 1101, or https://example.com"></label>
-		<label>Protocol<select name="PROTOCOL">${optionList(['vless', 'trojan'], config.PROTOCOL)}</select></label>
-		<label>Fingerprint<input name="FINGERPRINT" value="${escapeAttr(config.FINGERPRINT)}"></label>
 		<div class="actions">
 			<button type="submit">Save Settings</button>
 		</div>
@@ -317,6 +360,11 @@ document.querySelector('[data-copy]')?.addEventListener('click', async function 
 	this.textContent = 'Copied';
 	setTimeout(() => this.textContent = 'Copy', 1200);
 });
+document.querySelectorAll('[data-ports]').forEach(btn => {
+	btn.addEventListener('click', () => {
+		document.getElementById('portsInput').value = btn.dataset.ports;
+	});
+});
 </script>
 </body>
 </html>`;
@@ -329,7 +377,7 @@ function optionList(values, selected) {
 function adminStyles() {
 	return `<style>
 :root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f9;color:#111827}
-*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:#111827}.login-shell{min-height:100vh;display:grid;place-items:center;padding:24px}.admin-shell{max-width:1040px;margin:0 auto;padding:28px 18px 44px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.topbar h1,.panel h1,.panel h2{margin:0}.topbar nav{display:flex;gap:10px}.topbar a{color:#1f5fbf;text-decoration:none}.panel{background:#fff;border:1px solid #d8dde6;border-radius:8px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,24,40,.05)}.login-panel{width:min(420px,100%)}.muted{color:#667085;margin:.35rem 0 1rem}.alert{border:1px solid #f5b5b5;background:#fff1f1;color:#9f1d1d;border-radius:6px;padding:10px}.success{border:1px solid #b8dfc2;background:#effaf2;color:#166329;border-radius:6px;padding:10px}.grid-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.grid-form h2,.grid-form .actions{grid-column:1/-1}label{display:grid;gap:6px;font-weight:600;color:#344054}input,textarea,select{width:100%;border:1px solid #cfd6e1;border-radius:6px;padding:10px 11px;font:inherit;background:#fff;color:#111827}textarea{resize:vertical}button{border:0;border-radius:6px;background:#1f5fbf;color:#fff;padding:10px 14px;font-weight:700;cursor:pointer}button:hover{background:#174d9c}.copy-row{display:grid;grid-template-columns:1fr auto;gap:10px}.meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}.meta-grid div{border:1px solid #e4e7ec;border-radius:6px;padding:10px}.meta-grid span{display:block;color:#667085;font-size:13px}.meta-grid code{word-break:break-all}.danger button{background:#b42318}.danger button:hover{background:#912018}@media(max-width:720px){.grid-form,.meta-grid,.copy-row{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}}
+*{box-sizing:border-box}body{margin:0;background:#f6f7f9;color:#111827}.login-shell{min-height:100vh;display:grid;place-items:center;padding:24px}.admin-shell{max-width:1040px;margin:0 auto;padding:28px 18px 44px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.topbar h1,.panel h1,.panel h2{margin:0}.topbar nav{display:flex;gap:10px}.topbar a{color:#1f5fbf;text-decoration:none}.panel{background:#fff;border:1px solid #d8dde6;border-radius:8px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,24,40,.05)}.login-panel{width:min(420px,100%)}.muted{color:#667085;margin:.35rem 0 1rem}.alert{border:1px solid #f5b5b5;background:#fff1f1;color:#9f1d1d;border-radius:6px;padding:10px}.success{border:1px solid #b8dfc2;background:#effaf2;color:#166329;border-radius:6px;padding:10px}.grid-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.grid-form h2,.grid-form .actions{grid-column:1/-1}label{display:grid;gap:6px;font-weight:600;color:#344054}input,textarea,select{width:100%;border:1px solid #cfd6e1;border-radius:6px;padding:10px 11px;font:inherit;background:#fff;color:#111827}textarea{resize:vertical}button{border:0;border-radius:6px;background:#1f5fbf;color:#fff;padding:10px 14px;font-weight:700;cursor:pointer}button:hover{background:#174d9c}.field-hint{font-size:12px;font-weight:400;color:#667085;margin-top:2px}.port-presets{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.port-presets button{background:#f0f4ff;color:#1f5fbf;border:1px solid #c7d7f7;padding:4px 10px;font-size:13px;font-weight:600;border-radius:5px;cursor:pointer}.port-presets button:hover{background:#dde8ff}.copy-row{display:grid;grid-template-columns:1fr auto;gap:10px}.meta-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}.meta-grid div{border:1px solid #e4e7ec;border-radius:6px;padding:10px}.meta-grid span{display:block;color:#667085;font-size:13px}.meta-grid code{word-break:break-all}.danger button{background:#b42318}.danger button:hover{background:#912018}@media(max-width:720px){.grid-form,.meta-grid,.copy-row{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}}
 </style>`;
 }
 
