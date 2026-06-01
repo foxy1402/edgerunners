@@ -1,7 +1,8 @@
 const Version = '2026-06-01-ws-vless-trojan';
 
 let proxyIP = '', debugLog = false;
-let cachedProxyIP, cachedProxyAddresses, proxyAddressIndex = 0, proxyFallback = false;
+let cachedProxyIP, cachedProxyAddresses, cachedProxyAt = 0, proxyFallback = false;
+const PROXY_CACHE_TTL_MS = 5 * 60 * 1000;
 let preloadRaceDial = false, tcpRaceDial = 2;
 
 const WS_EARLY_DATA_MAX_BYTES = 8 * 1024;
@@ -218,6 +219,10 @@ async function authCookieValue(userAgent, key, adminSecret) {
 	return md5md5(userAgent + key + adminSecret);
 }
 
+async function csrfToken(token) {
+	return md5md5('csrf' + token);
+}
+
 async function hasValidAuthCookie(request, userAgent, key, adminSecret) {
 	const cookies = request.headers.get('Cookie') || '';
 	const authCookie = cookies.split(';').map(c => c.trim()).find(c => c.startsWith('auth='))?.split('=')[1];
@@ -248,28 +253,32 @@ function clearAuthCookie() {
 
 async function handleAdminRoute(request, env, url, config, defaultConfig, token, userID, hosts) {
 	if (url.pathname === '/admin/config.json') return jsonResponse(config);
-	if (request.method === 'POST' && url.pathname === '/admin/reset') {
-		await saveWorkerConfig(env, defaultConfig);
-		return redirectResponse('/admin?saved=reset');
-	}
-	if (request.method === 'POST' && url.pathname === '/admin/config') {
+	const csrf = await csrfToken(token);
+	if (request.method === 'POST') {
 		const params = new URLSearchParams(await request.text());
-		const nextConfig = normalizeConfig({
-			HOSTS: params.get('HOSTS') || '',
-			PATH: params.get('PATH') || '/',
-			PROTOCOL: params.get('PROTOCOL') || 'vless',
-			PORTS: params.get('PORTS') || '443',
-			SUB_NAME: params.get('SUB_NAME') || 'edgerunners',
-			PROXYIP: params.get('PROXYIP') || '',
-			URL: params.get('URL') || 'nginx',
-			FINGERPRINT: params.get('FINGERPRINT') || 'chrome',
-		}, defaultConfig);
-		await saveWorkerConfig(env, nextConfig);
-		return redirectResponse('/admin?saved=1');
+		if (params.get('_csrf') !== csrf) return textResponse('Invalid CSRF token', 403);
+		if (url.pathname === '/admin/reset') {
+			await saveWorkerConfig(env, defaultConfig);
+			return redirectResponse('/admin?saved=reset');
+		}
+		if (url.pathname === '/admin/config') {
+			const nextConfig = normalizeConfig({
+				HOSTS: params.get('HOSTS') || '',
+				PATH: params.get('PATH') || '/',
+				PROTOCOL: params.get('PROTOCOL') || 'vless',
+				PORTS: params.get('PORTS') || '443',
+				SUB_NAME: params.get('SUB_NAME') || 'edgerunners',
+				PROXYIP: params.get('PROXYIP') || '',
+				URL: params.get('URL') || 'nginx',
+				FINGERPRINT: params.get('FINGERPRINT') || 'chrome',
+			}, defaultConfig);
+			await saveWorkerConfig(env, nextConfig);
+			return redirectResponse('/admin?saved=1');
+		}
 	}
 	const subscriptionURL = `${url.origin}/sub?token=${encodeURIComponent(token)}`;
 	const kvReady = Boolean(env.KV && typeof env.KV.get === 'function' && typeof env.KV.put === 'function');
-	return htmlResponse(adminPageHTML({ config, subscriptionURL, userID, hosts, kvReady, saved: url.searchParams.get('saved') }));
+	return htmlResponse(adminPageHTML({ config, subscriptionURL, userID, hosts, kvReady, saved: url.searchParams.get('saved'), csrf }));
 }
 
 function loginPageHTML(error = '') {
@@ -295,7 +304,7 @@ ${adminStyles()}
 </html>`;
 }
 
-function adminPageHTML({ config, subscriptionURL, userID, hosts, kvReady, saved }) {
+function adminPageHTML({ config, subscriptionURL, userID, hosts, kvReady, saved, csrf }) {
 	const hostText = (config.HOSTS || hosts).join('\n');
 	return `<!doctype html>
 <html lang="en">
@@ -325,6 +334,7 @@ ${adminStyles()}
 		</div>
 	</section>
 	<form class="panel grid-form" method="post" action="/admin/config">
+		<input type="hidden" name="_csrf" value="${escapeAttr(csrf)}">
 		<h2>Settings</h2>
 		<label>Hosts<textarea name="HOSTS" rows="3">${escapeHTML(hostText)}</textarea></label>
 		<label>Path<input name="PATH" value="${escapeAttr(config.PATH)}"></label>
@@ -348,6 +358,7 @@ ${adminStyles()}
 		</div>
 	</form>
 	<form class="panel danger" method="post" action="/admin/reset">
+		<input type="hidden" name="_csrf" value="${escapeAttr(csrf)}">
 		<h2>Reset</h2>
 		<p class="muted">Restore the current environment-derived defaults.</p>
 		<button type="submit">Reset Config</button>
@@ -850,6 +861,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 	log(`[TCP] Target: ${host}:${portNum} | ProxyIP: ${proxyIP} | Fallback: ${proxyFallback}`);
 	const CONNECTION_TIMEOUT = 1000;
 	let proxySentFirstPacket = false;
+	let localProxyAddressIndex = 0;
 	const makeTCPConn = createTCPConnector(request);
 
 	async function waitForOpen(sock, timeoutMs = CONNECTION_TIMEOUT) {
@@ -919,12 +931,12 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 		}
 	}
 
-	async function connectViaProxyIP(address, port, data = null, allProxies = null, fallback = true) {
+	async function connectViaProxyIP(data = null, allProxies = null, fallback = true) {
 		if (allProxies && allProxies.length > 0) {
 			for (let i = 0; i < allProxies.length; i += tcpRaceDial) {
 				const candidates = [];
 				for (let j = 0; j < tcpRaceDial && i + j < allProxies.length; j++) {
-					const idx = (proxyAddressIndex + i + j) % allProxies.length;
+					const idx = (localProxyAddressIndex + i + j) % allProxies.length;
 					const [pAddr, pPort] = allProxies[idx];
 					candidates.push({ hostname: pAddr, port: pPort, index: idx });
 				}
@@ -934,7 +946,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 					socket = result.socket;
 					candidate = result.candidate;
 					await writeFirstPacket(socket, data);
-					proxyAddressIndex = candidate.index;
+					localProxyAddressIndex = candidate.index;
 					return socket;
 				} catch (err) {
 					try { socket?.close?.(); } catch (e) { }
@@ -942,7 +954,7 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 				}
 			}
 		}
-		if (fallback) return connectDirect(address, port, data, false);
+		if (fallback) return connectDirect(host, portNum, data, false);
 		closeSocketQuietly(ws);
 		throw new Error('All proxy connections failed and fallback is disabled.');
 	}
@@ -955,7 +967,8 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 			if (!proxyIP) throw new Error('Direct connection failed and PROXYIP is not configured.');
 			log(`[ProxyIP] Connecting to: ${host}:${portNum}`);
 			const allProxies = await resolveProxyAddresses(proxyIP, host, yourUUID);
-			const newSocket = await connectViaProxyIP(atob('UFJPWFlJUC50cDEuMDkwMjI3Lnh5eg=='), 1, firstPacketData, allProxies, proxyFallback);
+			if (!allProxies.length) throw new Error('No proxy addresses resolved.');
+			const newSocket = await connectViaProxyIP(firstPacketData, allProxies, proxyFallback);
 			if (doSendFirstPacket) proxySentFirstPacket = true;
 			remoteConnWrapper.socket = newSocket;
 			newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
@@ -1268,9 +1281,15 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 	if (!hasData && retryFunc) await retryFunc();
 }
 
+const SPEED_TEST_BLOCKLIST = [
+	'speed.cloudflare.com',
+	'speedtest.net',
+	'fast.com',
+	'speedtest.xfinity.com',
+];
+
 function isSpeedTestSite(hostname) {
-	const blocked = [atob('c3BlZWQuY2xvdWRmbGFyZS5jb20=')];
-	return blocked.some(d => hostname === d || hostname.endsWith('.' + d));
+	return SPEED_TEST_BLOCKLIST.some(d => hostname === d || hostname.endsWith('.' + d));
 }
 
 function createTCPConnector(request) {
@@ -1417,7 +1436,8 @@ function sha224(s) {
 
 async function resolveProxyAddresses(proxyIPInput, targetDomain = 'dash.cloudflare.com', UUID = '00000000-0000-4000-8000-000000000000') {
 	if (!proxyIPInput) return [];
-	if (!cachedProxyIP || !cachedProxyAddresses || cachedProxyIP !== proxyIPInput) {
+	const now = Date.now();
+	if (!cachedProxyIP || !cachedProxyAddresses || cachedProxyIP !== proxyIPInput || (now - cachedProxyAt) > PROXY_CACHE_TTL_MS) {
 		const normalized = proxyIPInput.toLowerCase();
 		function parseAddrPort(str) {
 			let addr = str, port = 443;
@@ -1455,6 +1475,7 @@ async function resolveProxyAddresses(proxyIPInput, targetDomain = 'dash.cloudfla
 		const shuffled = [...sorted].sort(() => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5);
 		cachedProxyAddresses = shuffled.slice(0, 8);
 		cachedProxyIP = proxyIPInput;
+		cachedProxyAt = now;
 	}
 	return cachedProxyAddresses;
 }
