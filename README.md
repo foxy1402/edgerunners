@@ -1,6 +1,6 @@
 # Edgerunners
 
-A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS, Trojan, and Shadowsocks over WebSocket.
+A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS and Trojan over WebSocket.
 
 > Simplified and translated to English from [cmliu/edgetunnel](https://github.com/cmliu/edgetunnel).
 
@@ -8,9 +8,9 @@ A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS, Troj
 
 ## Features
 
-- Protocols: VLESS, Trojan, Shadowsocks (AES-128/256-GCM)
+- Protocols: VLESS, Trojan
 - Transport: WebSocket over TLS
-- Outbound: Direct, ProxyIP fallback, SOCKS5, HTTP proxy
+- Outbound: Direct, ProxyIP fallback
 - Subscription endpoint at `/sub` — import one URL into any proxy client
 - Built-in admin panel at `/admin` (no external dependencies)
 - Camouflage: proxy to a real site or serve a fake nginx/Cloudflare error page
@@ -28,7 +28,6 @@ A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS, Troj
 | `PROXYIP`  | No                | Override the default ProxyIP. Accepts `hostname` or `ip:port`. |
 | `HOST`     | No                | Override the hostname(s) used in subscription links. |
 | `PATH`     | No                | WebSocket path prefix (default `/`). |
-| `GO2SOCKS5`| No                | Extra domains to force through SOCKS5 outbound. |
 | `URL`      | No                | Camouflage target. Use a URL, `nginx` (fake nginx page), or `1101` (fake Cloudflare error). |
 | `DEBUG`    | No                | Set to `1` to enable verbose logging. |
 
@@ -67,13 +66,13 @@ A lightweight VPN/proxy node built on Cloudflare Workers, supporting VLESS, Troj
 Import your subscription URL (`https://your-worker.workers.dev/sub?token=...`) directly into any of these apps.
 
 ### Windows
-- **[v2rayN](https://github.com/2dust/v2rayN/releases)** — free, open source. Supports VLESS / Trojan / Shadowsocks + subscription import.
+- **[v2rayN](https://github.com/2dust/v2rayN/releases)** — free, open source. Supports VLESS / Trojan + subscription import.
 
 ### Android
 - **[v2rayNG](https://github.com/2dust/v2rayNG/releases)** — free, open source. Same author as v2rayN. Also available on [Google Play](https://play.google.com/store/apps/details?id=com.v2ray.ang). Supports subscription import.
 
 ### iOS
-- **[Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)** — $2.99 on the App Store. Most reliable iOS proxy client, supports VLESS / Trojan / Shadowsocks + subscription import.
+- **[Shadowrocket](https://apps.apple.com/us/app/shadowrocket/id932747118)** — $2.99 on the App Store. Most reliable iOS proxy client, supports VLESS / Trojan + subscription import.
 - **[Sing-box](https://apps.apple.com/us/app/sing-box/id6451272673)** — free on the App Store. Open source, supports subscription import.
 
 ---

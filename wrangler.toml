@@ -1,6 +1,6 @@
-name = "edgerunners"
+name = "vpn1"
 main = "_worker.js"
-compatibility_date = "2025-11-04"
+compatibility_date = "2026-05-31"
 keep_vars = true
 
 # Uncomment and fill in your KV namespace ID to enable config persistence
